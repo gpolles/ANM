@@ -115,6 +115,7 @@ void integrate_dof(vector<size_t>& intids, ContactMap& newcm, SparseMatrix<float
     for (size_t alpha = 0; alpha < 3; ++alpha) {
       for (size_t beta = 0; beta < 3; ++beta) {
         H(i*3+alpha,i*3+beta) = diagonal[alpha][beta];
+        // TODO: remember there is a bug
       }
     }
   }
