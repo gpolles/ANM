@@ -7,7 +7,7 @@
 //============================================================================
 
 #include <iostream>
-
+#include <vector>
 #include <mylib/mylib.h>
 
 using namespace std;
@@ -16,17 +16,49 @@ using namespace mylib;
 int main(int argc, char** argv) {
   PdbFile pdb(argv[1]); // already only CA, no check
 
-  vector<Vector3d> crd = pdb.coords;
+  vector<Vector3d>& crd = pdb.coords;
 
+  cout << argv[1] << " is a " <<crd.size()<<" atoms file. Computing contact map" <<endl;
   ContactMap cm(crd,7.5);
 
   SparseMatrix<float> H0(crd.size()*3);
 
+  cout << "Generating matrix" <<endl;
+  generate_matrix(crd,cm,H0);
 
+  size_t resize_factor = 3;
+  vector<size_t> intids, retainids;
+  vector<Vector3d> newcrd;
+  vector<bool> retain(crd.size(),false);
+  for (size_t i = 0; i < crd.size(); ++i){
+    if (i%resize_factor == 0) {
+      intids.push_back(i);
+      newcrd.push_back(crd[i]);
+      retain[i]=true;
+    }
+    else retainids.push_back(i);
+  }
 
+  // update cm. In order to save memory, we clear what we don't need
+  // and we use the old contact map.
 
+  cout << "Recomputing contact map, resize factor is: " << resize_factor <<endl;
+  ContactMap newcm(newcrd,7.5*resize_factor);
+  size_t k=0;
+  for (size_t i = 0; i < crd.size(); ++i){
+    if(retain[i]) {
+      cm._cm[i].swap(newcm._cm[k]);
+      k++;
+    }else {
+      std::vector<size_t>().swap(cm._cm[i]);
+    }
+  }
 
-	cout << "!!!Hello World!!!" << endl; // prints !!!Hello World!!!
+  cout << "Integrating... " <<endl;
+  integrate_dof(intids,cm,H0);
+
+  cout << "Done. nnz = " << H0.getNumNonZero() <<endl;
+
 	return 0;
 }
 
@@ -60,23 +92,26 @@ void generate_matrix(vector<Vector3d>& crd, ContactMap& cm, SparseMatrix<float>&
 }
 
 void integrate_dof(vector<size_t>& intids, ContactMap& newcm, SparseMatrix<float>& H){
+
+  // iteratively integrate H'(m,n) = H(m,n) + Sum_k [H(m,k)H(n,k)/H(k,k)]
   for (size_t id : intids){
     for (size_t alpha = 2; alpha >= 0; --alpha) {
       size_t k = id*3+alpha;
       double l_k = 1.0/H(k,k);
       auto& row = H.getRow(k);
 
-      // apply corrections
+      // apply corrections. Note that diagonal elements are recalculated later.
       for (size_t ri = 0; ri < row.size(); ++ri) {
         for (size_t rj = ri+1; rj < row.size(); ++rj) {
           size_t m = row[ri].columnIndex;
           size_t n = row[rj].columnIndex;
+          size_t i = m/3;
+          size_t j = n/3;
+          if (i==j) continue;
           float H_km = row[ri].value;
           float H_kn = row[rj].value;
-          float correction = l_k*H_km*H_kn;
+          float correction = 2*l_k*H_km*H_kn;
           // correct only for i,j in contact
-          size_t i = m/3;
-          size_t j = m/3;
           if ( newcm.isNeighbor(i,j) ){
             if (!H.isDefined(m,n)){
               H.insert(m,n,correction);
@@ -98,10 +133,14 @@ void integrate_dof(vector<size_t>& intids, ContactMap& newcm, SparseMatrix<float
     }
   }
 
-  // recalculate diagonals
-  for (size_t i : intids){
+  // recalculate diagonals for retained beads
+  vector<size_t> retainids;
+  for (size_t i = 0; i < newcm.size(); ++i)
+    if(!is_in(i,intids)) retainids.push_back(i);
+
+  for (size_t i : retainids){
     Matrix3d diagonal;
-    for (int alpha = 0; alpha < 3; ++alpha) {
+    for (size_t alpha = 0; alpha < 3; ++alpha) {
       size_t k = i*3+alpha;
       auto& row = H.getRow(k);
       for (auto el: row){
@@ -115,10 +154,16 @@ void integrate_dof(vector<size_t>& intids, ContactMap& newcm, SparseMatrix<float
     for (size_t alpha = 0; alpha < 3; ++alpha) {
       for (size_t beta = 0; beta < 3; ++beta) {
         H(i*3+alpha,i*3+beta) = diagonal[alpha][beta];
-        // TODO: remember there is a bug
       }
     }
   }
+
+  // recalculate number of nonzero entries
+  size_t nnz = 0;
+  for (size_t i = 0; i < H.size(); ++i){
+    nnz += H._rows[i].size();
+  }
+  H._numNonZero = nnz;
 
 }
 
